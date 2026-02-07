@@ -1,6 +1,7 @@
 import os
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from db import users_col, groups_col
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+
 
 OWNER_ID = int(os.getenv("OWNER_USER_ID"))
 CTX = {}
