@@ -1,33 +1,51 @@
-from telegram.ext import CommandHandler
-from storage import users_col, groups_col
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from db import users_col, groups_col
 
-OWNER_ID = 8455806295
+OWNER_ID = int(os.getenv("OWNER_USER_ID"))
+CTX = {}
 
 async def broadcast(update, context):
     if update.effective_user.id != OWNER_ID:
-        return await update.message.reply_text("Owner only")
+        return
 
     if not update.message.reply_to_message:
         return await update.message.reply_text("Reply to a message")
 
-    msg = update.message.reply_to_message
+    CTX[OWNER_ID] = update.message.reply_to_message
+
+    kb = [
+        [InlineKeyboardButton("👤 Users", callback_data="users")],
+        [InlineKeyboardButton("👥 Groups", callback_data="groups")],
+        [InlineKeyboardButton("🌍 All", callback_data="all")]
+    ]
+
+    await update.message.reply_text("Choose target:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def broadcast_btn(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    if q.from_user.id != OWNER_ID:
+        return
+
+    msg = CTX.get(OWNER_ID)
+    if not msg:
+        return await q.edit_message_text("Expired")
+
+    if q.data == "users":
+        ids = [u["id"] async for u in users_col.find()]
+    elif q.data == "groups":
+        ids = [g["id"] async for g in groups_col.find()]
+    else:
+        ids = [u["id"] async for u in users_col.find()] + \
+              [g["id"] async for g in groups_col.find()]
+
     sent = 0
-
-    for u in users_col.find():
+    for cid in ids:
         try:
-            await msg.copy(u["user_id"])
+            await msg.copy(cid)
             sent += 1
         except:
             pass
 
-    for g in groups_col.find():
-        try:
-            await msg.copy(g["chat_id"])
-            sent += 1
-        except:
-            pass
-
-    await update.message.reply_text(f"✅ Broadcast sent to {sent}")
-
-def setup_broadcast(app):
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    await q.edit_message_text(f"✅ Broadcast sent to {sent}")
