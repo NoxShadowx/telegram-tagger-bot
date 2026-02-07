@@ -1,6 +1,10 @@
-import time, random, asyncio
+import os
+import time
+import random
+import asyncio
 from telegram.constants import ChatType
 from db import tags_col
+
 
 ANTI_SPAM_SECONDS = int(os.getenv("ANTI_SPAM_SECONDS", 8))
 MAX_SINGLE_TAG = int(os.getenv("MAX_SINGLE_TAG", 50))
