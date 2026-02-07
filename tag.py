@@ -1,59 +1,50 @@
 import time, random, asyncio
-from telegram.ext import CommandHandler
-from storage import get_tags, add_tag, delete_tag, tag_count
+from telegram.constants import ChatType
+from db import tags_col
 
-OWNER_ID = 8455806295
-MAX_SINGLE_TAG = 50
-ANTI_SPAM = 8
+ANTI_SPAM_SECONDS = int(os.getenv("ANTI_SPAM_SECONDS", 8))
+MAX_SINGLE_TAG = int(os.getenv("MAX_SINGLE_TAG", 50))
 
 TAG_TASKS = {}
-LAST_TIME = {}
+LAST_CMD = {}
 
-DEFAULT_TAGS = [
-    "{user} ɪᴅʜᴀʀ ᴀᴀᴏ ᴛʜᴏᴅᴀ sᴀ ʙᴀᴀᴛ ᴋᴀʀɴɪ ʜᴀɪ 👀",
-    "{user} ᴋᴀʜᴀ ʜᴏ ᴀᴀᴊ ᴅɪᴋʜᴀɪ ɴᴀʜɪ ʀᴀʜᴇ 🤨",
-    "{user} ᴏɴʟɪɴᴇ ᴀᴀ ᴊᴀᴏ ɢʀᴏᴜᴘ ᴛᴜᴍʜᴇ ʏᴀᴀᴅ ᴋᴀʀ ʀᴀʜᴀ 😜",
-]
+def anti_spam(chat_id):
+    now = time.time()
+    if chat_id in LAST_CMD and now - LAST_CMD[chat_id] < ANTI_SPAM_SECONDS:
+        return False
+    LAST_CMD[chat_id] = now
+    return True
 
-# ensure defaults exist
-if not get_tags():
-    for t in DEFAULT_TAGS:
-        add_tag(t)
-
-def stop(chat_id):
+def stop_tag(chat_id):
     task = TAG_TASKS.pop(chat_id, None)
     if task:
         task.cancel()
 
-def allowed(chat_id):
-    now = time.time()
-    if chat_id in LAST_TIME and now - LAST_TIME[chat_id] < ANTI_SPAM:
-        return False
-    LAST_TIME[chat_id] = now
-    return True
+async def get_random_tag():
+    docs = await tags_col.find().to_list(1000)
+    return random.choice(docs)["text"]
 
-# ---------- SINGLE USER TAG ----------
-async def tag(update, context):
+async def tag_single(update, context):
     chat = update.effective_chat
     msg = update.message
 
-    if not allowed(chat.id):
+    if not anti_spam(chat.id):
         return await msg.reply_text("⏳ Slow down")
 
-    ent = next((e for e in msg.entities or [] if e.type in ("mention","text_mention")), None)
+    ent = next((e for e in (msg.entities or []) if e.type in ("mention", "text_mention")), None)
     if not ent:
         return await msg.reply_text("Usage: /tag @user [text]")
 
     user = ent.user if ent.type == "text_mention" else await context.bot.get_chat(
-        msg.text[ent.offset: ent.offset+ent.length]
+        msg.text[ent.offset: ent.offset + ent.length]
     )
 
-    stop(chat.id)
+    stop_tag(chat.id)
 
     text = msg.text.replace(msg.text.split()[0], "").strip()
-    tags = get_tags()
     if not text:
-        text = random.choice(tags)
+        text = await get_random_tag()
+
     if "{user}" not in text:
         text = f"{user.mention_html()} {text}"
 
@@ -65,42 +56,23 @@ async def tag(update, context):
     TAG_TASKS[chat.id] = asyncio.create_task(run())
     await msg.reply_text("✅ Tagging started (auto-stops at 50)")
 
-# ---------- CANCEL ----------
-async def tagcancel(update, _):
-    stop(update.effective_chat.id)
+async def tagcancel(update, context):
+    stop_tag(update.effective_chat.id)
     await update.message.reply_text("❌ Tagging cancelled")
 
-# ---------- OWNER TAG MANAGEMENT ----------
-async def addtag_cmd(update, context):
-    if update.effective_user.id != OWNER_ID:
-        return await update.message.reply_text("❌ Owner only")
+async def addtag(update, context):
+    if update.effective_user.id != int(os.getenv("OWNER_USER_ID")):
+        return
 
     text = " ".join(context.args)
     if not text or "{user}" not in text:
         return await update.message.reply_text("Usage: /addtag {user} sentence")
 
-    add_tag(text)
-    await update.message.reply_text(f"✅ Tag added | Total: {tag_count()}")
+    await tags_col.insert_one({"text": text})
+    await update.message.reply_text("✅ Tag sentence added")
 
-async def deltag_cmd(update, context):
-    if update.effective_user.id != OWNER_ID:
+async def tagcount(update, context):
+    if update.effective_user.id != int(os.getenv("OWNER_USER_ID")):
         return
-    if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("Usage: /deltag <number>")
-
-    removed = delete_tag(int(context.args[0]) - 1)
-    if not removed:
-        return await update.message.reply_text("Invalid index")
-
-    await update.message.reply_text(f"🗑 Removed:\n{removed}")
-
-async def tagcount_cmd(update, _):
-    if update.effective_user.id == OWNER_ID:
-        await update.message.reply_text(f"📊 Total tags: {tag_count()}")
-
-def setup_tag(app):
-    app.add_handler(CommandHandler("tag", tag))
-    app.add_handler(CommandHandler("tagcancel", tagcancel))
-    app.add_handler(CommandHandler("addtag", addtag_cmd))
-    app.add_handler(CommandHandler("deltag", deltag_cmd))
-    app.add_handler(CommandHandler("tagcount", tagcount_cmd))
+    count = await tags_col.count_documents({})
+    await update.message.reply_text(f"📊 Total tag sentences: {count}")
