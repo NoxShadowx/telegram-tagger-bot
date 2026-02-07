@@ -1,67 +1,100 @@
 import time
-from telegram.ext import CommandHandler, MessageHandler, filters
-from storage import add_filter, delete_filter, get_filters
+from telegram.constants import ChatType
+from db import filters_col
 
-COOLDOWN = 3
-LAST = {}
+FILTER_COOLDOWN = int(os.getenv("FILTER_COOLDOWN", 3))
+COOLDOWN = {}
 
-async def is_admin(chat, uid):
+async def is_admin(update):
+    chat = update.effective_chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return False
     admins = await chat.get_administrators()
-    return uid in [a.user.id for a in admins]
+    return update.effective_user.id in [a.user.id for a in admins]
 
 async def addfilter(update, context):
-    if not await is_admin(update.effective_chat, update.effective_user.id):
-        return await update.message.reply_text("Admins only")
+    if not await is_admin(update):
+        return await update.message.reply_text("❌ Admins only")
 
-    if not update.message.reply_to_message or not context.args:
-        return await update.message.reply_text("Reply: /addfilter trigger")
+    msg = update.message
+    if not msg.reply_to_message or not context.args:
+        return await msg.reply_text("Reply: /addfilter trigger")
 
-    r = update.message.reply_to_message
-    payload = {"type":"text","text":r.text or r.caption}
+    trigger = context.args[0].lower()
+    r = msg.reply_to_message
 
-    if r.photo: payload={"type":"photo","id":r.photo[-1].file_id}
-    elif r.video: payload={"type":"video","id":r.video.file_id}
-    elif r.sticker: payload={"type":"sticker","id":r.sticker.file_id}
-    elif r.animation: payload={"type":"animation","id":r.animation.file_id}
-    elif r.voice: payload={"type":"voice","id":r.voice.file_id}
-    elif r.document: payload={"type":"document","id":r.document.file_id}
+    payload = {"type": "text", "text": r.text or r.caption}
+    if r.photo:
+        payload = {"type": "photo", "file_id": r.photo[-1].file_id}
+    elif r.video:
+        payload = {"type": "video", "file_id": r.video.file_id}
+    elif r.sticker:
+        payload = {"type": "sticker", "file_id": r.sticker.file_id}
+    elif r.animation:
+        payload = {"type": "animation", "file_id": r.animation.file_id}
+    elif r.voice:
+        payload = {"type": "voice", "file_id": r.voice.file_id}
+    elif r.document:
+        payload = {"type": "document", "file_id": r.document.file_id}
 
-    add_filter(update.effective_chat.id, context.args[0].lower(), payload)
-    await update.message.reply_text("✅ Filter saved")
+    await filters_col.update_one(
+        {"chat_id": update.effective_chat.id, "trigger": trigger},
+        {"$set": {"payload": payload}},
+        upsert=True
+    )
+
+    await msg.reply_text(f"✅ Filter `{trigger}` saved")
 
 async def delfilter(update, context):
-    if not await is_admin(update.effective_chat, update.effective_user.id):
+    if not await is_admin(update):
         return
-    delete_filter(update.effective_chat.id, context.args[0].lower())
+    if not context.args:
+        return
+    await filters_col.delete_one({
+        "chat_id": update.effective_chat.id,
+        "trigger": context.args[0].lower()
+    })
     await update.message.reply_text("🗑 Filter deleted")
 
-async def watch(update, context):
+async def listfilters(update, context):
+    cur = filters_col.find({"chat_id": update.effective_chat.id})
+    triggers = [f["trigger"] async for f in cur]
+    if not triggers:
+        return await update.message.reply_text("No filters")
+    await update.message.reply_text("\n".join(triggers))
+
+async def watch_filters(update, context):
     msg = update.message
     if not msg or msg.from_user.is_bot:
         return
 
+    key = (msg.chat_id, msg.from_user.id)
+    now = time.time()
+    if key in COOLDOWN and now - COOLDOWN[key] < FILTER_COOLDOWN:
+        return
+
     text = (msg.text or msg.caption or "").lower()
-    cid = update.effective_chat.id
+    if not text:
+        return
 
-    for k,v in get_filters(cid).items():
-        if k in text:
-            key=(cid,msg.from_user.id)
-            now=time.time()
-            if key in LAST and now-LAST[key]<COOLDOWN:
-                return
-            LAST[key]=now
+    async for f in filters_col.find({"chat_id": msg.chat_id}):
+        if f["trigger"] in text:
+            COOLDOWN[key] = now
+            p = f["payload"]
+            t = p["type"]
 
-            t=v["type"]
-            if t=="text": await msg.reply_text(v["text"])
-            elif t=="photo": await msg.reply_photo(v["id"])
-            elif t=="video": await msg.reply_video(v["id"])
-            elif t=="sticker": await msg.reply_sticker(v["id"])
-            elif t=="animation": await msg.reply_animation(v["id"])
-            elif t=="voice": await msg.reply_voice(v["id"])
-            elif t=="document": await msg.reply_document(v["id"])
+            if t == "text":
+                await msg.reply_text(p["text"])
+            elif t == "photo":
+                await msg.reply_photo(p["file_id"])
+            elif t == "video":
+                await msg.reply_video(p["file_id"])
+            elif t == "sticker":
+                await msg.reply_sticker(p["file_id"])
+            elif t == "animation":
+                await msg.reply_animation(p["file_id"])
+            elif t == "voice":
+                await msg.reply_voice(p["file_id"])
+            elif t == "document":
+                await msg.reply_document(p["file_id"])
             break
-
-def setup_filters(app):
-    app.add_handler(CommandHandler("addfilter", addfilter))
-    app.add_handler(CommandHandler("delfilter", delfilter))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, watch))
